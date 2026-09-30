@@ -9,10 +9,10 @@ import uvicorn
 import json
 import os
 
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # CONFIGURAÇÕES
 # ═══════════════════════════════════════════════════════════════
-ORB_MINUTES = 10
+ORB_MINUTES = 10  # ORB de 10 minutos (2 candles de 5min)
 SCAN_INTERVAL = 15
 
 ORB_SESSIONS = {
@@ -54,7 +54,7 @@ candles_cache = {}
 connected_clients = []
 client_filters = {}
 
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # FUNÇÕES AUXILIARES
 # ═══════════════════════════════════════════════════════════════
 async def create_exchanges():
@@ -107,22 +107,26 @@ def get_session_start_utc(session_key):
     return int(session_start.timestamp() * 1000), session_start
 
 async def calculate_orb(exchange, symbol, session_key):
+    """
+    Calcula o ORB usando candles de 5 minutos.
+    2 candles de 5min = 10 minutos de ORB.
+    Busca diretamente do timestamp do início da sessão.
+    """
     try:
         # Pega o timestamp exato do início da sessão
         session_start_ms, session_start_dt = get_session_start_utc(session_key)
         
-        # BUSCA DIRETAMENTE DO INÍCIO DA SESSÃO! 
-        # since=timestamp diz à exchange: "me dê candles a partir deste momento"
-        # limit=20 pega os primeiros 20 candles (mais que suficiente para os 10 do ORB)
-        ohlcv = await exchange.fetch_ohlcv(symbol, '1m', since=session_start_ms, limit=20)
+        # BUSCA CANDLES DE 5 MINUTOS a partir do início da sessão
+        # limit=4 para garantir que pegamos pelo menos 2 candles (10 minutos)
+        ohlcv = await exchange.fetch_ohlcv(symbol, '5m', since=session_start_ms, limit=4)
         
-        if not ohlcv or len(ohlcv) < ORB_MINUTES:
+        if not ohlcv or len(ohlcv) < 2:  # Precisa de pelo menos 2 candles (10 minutos)
             return None
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # Pega apenas os primeiros 10 candles (ORB de 10 minutos)
-        orb_candles = df.head(ORB_MINUTES)
+        # Pega os primeiros 2 candles de 5min (= 10 minutos de ORB)
+        orb_candles = df.head(2)
         
         orb_high = float(orb_candles['high'].max())
         orb_low = float(orb_candles['low'].min())
@@ -130,11 +134,11 @@ async def calculate_orb(exchange, symbol, session_key):
         
         # DEBUG: Imprime o cálculo do BTC para validarmos
         if symbol == 'BTC/USDT:USDT':
-            print(f"🔍 DEBUG BTC | Sessão: {session_key} | Início: {session_start_dt.strftime('%H:%M UTC')} | ORB High: {orb_high} | ORB Low: {orb_low} | Preço Atual: {current_price} | Candles encontrados: {len(ohlcv)}")
+            print(f"🔍 DEBUG BTC (5min) | Sessão: {session_key} | Início: {session_start_dt.strftime('%H:%M UTC')} | ORB High: {orb_high} | ORB Low: {orb_low} | Preço Atual: {current_price} | Candles encontrados: {len(ohlcv)}")
         
         return {'orb_high': orb_high, 'orb_low': orb_low, 'price': current_price}
     except Exception as e:
-        print(f" Erro ao calcular ORB para {symbol}: {e}")
+        print(f"❌ Erro ao calcular ORB para {symbol}: {e}")
         return None
 
 async def scan_pair(exchanges, symbol, session_key):
@@ -191,7 +195,7 @@ async def broadcast_scan_results():
     disconnected = []
     for client in connected_clients:
         try:
-            filters = client_filters.get(client, {'session': DEFAULT_SESSION, 'filter': 'both'})
+            filters = client_filters.get(client, {'session': DEFAULT_SESSION, 'filter': 'all'})
             session_key = filters['session']
             filter_type = filters['filter']
             
@@ -235,6 +239,7 @@ async def scanner_loop():
 async def lifespan(app: FastAPI):
     print("🚀 Servidor iniciando...")
     print("📅 Sessões ORB: 21:00 BRT (00:00 UTC) | 10:30 BRT (13:30 UTC)")
+    print("📊 Timeframe do ORB: 5 minutos (2 candles = 10 min)")
     asyncio.create_task(scanner_loop())
     yield
 
@@ -303,7 +308,7 @@ async def serve_frontend():
 
 # ═══════════════════════════════════════════════════════════════
 # INICIALIZAÇÃO
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
