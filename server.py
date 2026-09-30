@@ -15,10 +15,9 @@ import os
 ORB_MINUTES = 10
 SCAN_INTERVAL = 15
 
-# Horários de início do ORB em UTC (Brasília é UTC-3)
 ORB_SESSIONS = {
-    '21:00': {'start_utc': time(0, 0, 0), 'duration_hours': 5},      # 21:00 BRT = 00:00 UTC
-    '10:30': {'start_utc': time(13, 30, 0), 'duration_hours': 8},    # 10:30 BRT = 13:30 UTC
+    '21:00': time(0, 0, 0),      # 21:00 BRT = 00:00 UTC
+    '10:30': time(13, 30, 0),    # 10:30 BRT = 13:30 UTC
 }
 
 DEFAULT_SESSION = '21:00'
@@ -88,48 +87,54 @@ async def get_best_exchange_for_pair(exchanges, symbol):
     best = candidates[0]
     return best['exchange'], best['ticker']
 
+def get_session_start_utc(session_key):
+    """Retorna o timestamp UTC (em ms) do início da sessão mais recente"""
+    session_time = ORB_SESSIONS[session_key]
+    now_utc = datetime.now(timezone.utc)
+    
+    session_start = now_utc.replace(
+        hour=session_time.hour,
+        minute=session_time.minute,
+        second=0,
+        microsecond=0
+    )
+    
+    # Se o horário atual é antes do início da sessão hoje, usa ontem
+    if now_utc < session_start:
+        session_start = session_start - pd.Timedelta(days=1)
+    
+    # Converte para timestamp em milissegundos (formato que o ccxt usa)
+    return int(session_start.timestamp() * 1000), session_start
+
 async def calculate_orb(exchange, symbol, session_key):
     try:
-        session_config = ORB_SESSIONS[session_key]
-        session_start_time = session_config['start_utc']
-        now_utc = datetime.now(timezone.utc)
+        # Pega o timestamp exato do início da sessão
+        session_start_ms, session_start_dt = get_session_start_utc(session_key)
         
-        # Define o início da sessão de hoje
-        session_start = now_utc.replace(
-            hour=session_start_time.hour,
-            minute=session_start_time.minute,
-            second=0,
-            microsecond=0
-        )
+        # BUSCA DIRETAMENTE DO INÍCIO DA SESSÃO! 
+        # since=timestamp diz à exchange: "me dê candles a partir deste momento"
+        # limit=20 pega os primeiros 20 candles (mais que suficiente para os 10 do ORB)
+        ohlcv = await exchange.fetch_ohlcv(symbol, '1m', since=session_start_ms, limit=20)
         
-        # Se o horário atual for antes do início da sessão hoje, usa a sessão de ontem
-        if now_utc < session_start:
-            session_start = session_start - pd.Timedelta(days=1)
-        
-        # BUSCA 24 HORAS DE DADOS (1440 minutos). Isso GARANTE que o início da sessão está nos dados.
-        ohlcv = await exchange.fetch_ohlcv(symbol, '1m', limit=1440)
         if not ohlcv or len(ohlcv) < ORB_MINUTES:
             return None
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         
-        # Filtra apenas os candles a partir do início exato da sessão
-        session_candles = df[df['timestamp'] >= session_start].head(ORB_MINUTES)
+        # Pega apenas os primeiros 10 candles (ORB de 10 minutos)
+        orb_candles = df.head(ORB_MINUTES)
         
-        if len(session_candles) < ORB_MINUTES:
-            return None
-        
-        orb_high = float(session_candles['high'].max())
-        orb_low = float(session_candles['low'].min())
+        orb_high = float(orb_candles['high'].max())
+        orb_low = float(orb_candles['low'].min())
         current_price = float(df.iloc[-1]['close'])
         
-        # RAIO-X: Imprime no log do Render APENAS para o BTC, para validarmos o cálculo
+        # DEBUG: Imprime o cálculo do BTC para validarmos
         if symbol == 'BTC/USDT:USDT':
-            print(f"🔍 DEBUG BTC | Sessão: {session_key} | Início: {session_start.strftime('%H:%M')} | ORB High: {orb_high} | ORB Low: {orb_low} | Preço Atual: {current_price}")
+            print(f"🔍 DEBUG BTC | Sessão: {session_key} | Início: {session_start_dt.strftime('%H:%M UTC')} | ORB High: {orb_high} | ORB Low: {orb_low} | Preço Atual: {current_price} | Candles encontrados: {len(ohlcv)}")
         
         return {'orb_high': orb_high, 'orb_low': orb_low, 'price': current_price}
     except Exception as e:
+        print(f" Erro ao calcular ORB para {symbol}: {e}")
         return None
 
 async def scan_pair(exchanges, symbol, session_key):
@@ -198,7 +203,9 @@ async def broadcast_scan_results():
                 result_data = {'above': above, 'below': [], 'inside': []}
             elif filter_type == 'below':
                 result_data = {'above': [], 'below': below, 'inside': []}
-            else:
+            elif filter_type == 'inside':
+                result_data = {'above': [], 'below': [], 'inside': inside}
+            else:  # 'all'
                 result_data = {'above': above, 'below': below, 'inside': inside}
             
             result_data['updated'] = datetime.now().strftime("%H:%M:%S")
@@ -207,6 +214,7 @@ async def broadcast_scan_results():
             message = json.dumps(result_data, default=str)
             await client.send_text(message)
         except Exception as e:
+            print(f"Erro ao enviar para cliente: {e}")
             disconnected.append(client)
     
     for client in disconnected:
@@ -274,7 +282,7 @@ async def get_candles(symbol: str, timeframe: str = "5m", limit: int = 200):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_clients.append(websocket)
-    client_filters[websocket] = {'session': DEFAULT_SESSION, 'filter': 'both'}
+    client_filters[websocket] = {'session': DEFAULT_SESSION, 'filter': 'all'}
     try:
         while True:
             message = await websocket.receive_text()
