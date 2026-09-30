@@ -15,9 +15,10 @@ import os
 ORB_MINUTES = 10
 SCAN_INTERVAL = 15
 
+# Horários de início do ORB em UTC (Brasília é UTC-3)
 ORB_SESSIONS = {
-    '21:00': {'start_utc': time(0, 0, 0), 'duration_hours': 5},
-    '10:30': {'start_utc': time(13, 30, 0), 'duration_hours': 8},
+    '21:00': {'start_utc': time(0, 0, 0), 'duration_hours': 5},      # 21:00 BRT = 00:00 UTC
+    '10:30': {'start_utc': time(13, 30, 0), 'duration_hours': 8},    # 10:30 BRT = 13:30 UTC
 }
 
 DEFAULT_SESSION = '21:00'
@@ -91,9 +92,9 @@ async def calculate_orb(exchange, symbol, session_key):
     try:
         session_config = ORB_SESSIONS[session_key]
         session_start_time = session_config['start_utc']
-        
         now_utc = datetime.now(timezone.utc)
         
+        # Define o início da sessão de hoje
         session_start = now_utc.replace(
             hour=session_start_time.hour,
             minute=session_start_time.minute,
@@ -101,24 +102,19 @@ async def calculate_orb(exchange, symbol, session_key):
             microsecond=0
         )
         
+        # Se o horário atual for antes do início da sessão hoje, usa a sessão de ontem
         if now_utc < session_start:
             session_start = session_start - pd.Timedelta(days=1)
         
-        # Calcula quantos minutos se passaram desde o início da sessão
-        minutes_since_start = int((now_utc - session_start).total_seconds() / 60)
-        
-        # Busca candles suficientes para cobrir desde o início da sessão + margem
-        candles_needed = minutes_since_start + ORB_MINUTES + 10
-        limit = min(candles_needed, 1000)  # Máximo 1000 candles
-        
-        ohlcv = await exchange.fetch_ohlcv(symbol, '1m', limit=limit)
+        # BUSCA 24 HORAS DE DADOS (1440 minutos). Isso GARANTE que o início da sessão está nos dados.
+        ohlcv = await exchange.fetch_ohlcv(symbol, '1m', limit=1440)
         if not ohlcv or len(ohlcv) < ORB_MINUTES:
             return None
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         
-        # Filtra candles a partir do início da sessão
+        # Filtra apenas os candles a partir do início exato da sessão
         session_candles = df[df['timestamp'] >= session_start].head(ORB_MINUTES)
         
         if len(session_candles) < ORB_MINUTES:
@@ -127,6 +123,10 @@ async def calculate_orb(exchange, symbol, session_key):
         orb_high = float(session_candles['high'].max())
         orb_low = float(session_candles['low'].min())
         current_price = float(df.iloc[-1]['close'])
+        
+        # RAIO-X: Imprime no log do Render APENAS para o BTC, para validarmos o cálculo
+        if symbol == 'BTC/USDT:USDT':
+            print(f"🔍 DEBUG BTC | Sessão: {session_key} | Início: {session_start.strftime('%H:%M')} | ORB High: {orb_high} | ORB Low: {orb_low} | Preço Atual: {current_price}")
         
         return {'orb_high': orb_high, 'orb_low': orb_low, 'price': current_price}
     except Exception as e:
@@ -140,11 +140,14 @@ async def scan_pair(exchanges, symbol, session_key):
     orb_data = await calculate_orb(exchange, symbol, session_key)
     if not orb_data:
         return None
+    
     price = orb_data['price']
     orb_high = orb_data['orb_high']
     orb_low = orb_data['orb_low']
+    
     status = None
     distance_pct = 0
+    
     if price > orb_high:
         status = 'ACIMA'
         distance_pct = ((price - orb_high) / orb_high) * 100
@@ -154,6 +157,7 @@ async def scan_pair(exchanges, symbol, session_key):
     else:
         status = 'DENTRO'
         distance_pct = 0
+        
     return {
         'symbol': symbol.replace('/USDT:USDT', ''),
         'exchange': ex_id,
@@ -168,9 +172,11 @@ async def scan_pair(exchanges, symbol, session_key):
 async def run_full_scan(exchanges, session_key):
     tasks = [scan_pair(exchanges, symbol, session_key) for symbol in BREAKOUT_PROP_PAIRS]
     results = await asyncio.gather(*tasks)
+    
     above = sorted([r for r in results if r and r['status'] == 'ACIMA'], key=lambda x: x['distance_pct'], reverse=True)
     below = sorted([r for r in results if r and r['status'] == 'ABAIXO'], key=lambda x: x['distance_pct'], reverse=True)
     inside = [r for r in results if r and r['status'] == 'DENTRO']
+    
     return above, below, inside
 
 async def broadcast_scan_results():
@@ -219,7 +225,7 @@ async def scanner_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(" Servidor iniciando...")
+    print("🚀 Servidor iniciando...")
     print("📅 Sessões ORB: 21:00 BRT (00:00 UTC) | 10:30 BRT (13:30 UTC)")
     asyncio.create_task(scanner_loop())
     yield
