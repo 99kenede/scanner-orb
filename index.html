@@ -39,6 +39,7 @@
         .filter-btn.active { background: #00d4ff; color: #0a0e17; border-color: #00d4ff; font-weight: bold; }
         .filter-btn.above.active { background: #00ff88; border-color: #00ff88; }
         .filter-btn.below.active { background: #ff4757; border-color: #ff4757; }
+        .filter-btn.inside.active { background: #ffa500; border-color: #ffa500; }
         .status { display: flex; align-items: center; gap: 8px; font-size: 0.9em; }
         .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #00ff88; animation: pulse 2s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
@@ -67,7 +68,7 @@
         tr:hover { background: #252b3d; }
         .above { color: #00ff88; font-weight: bold; }
         .below { color: #ff4757; font-weight: bold; }
-        .inside { color: #8892a0; }
+        .inside { color: #ffa500; font-weight: bold; }
         .session-badge {
             background: #00d4ff;
             color: #0a0e17;
@@ -104,7 +105,8 @@
                 <div class="filter-buttons">
                     <button class="filter-btn above active" data-filter="above">🟢 Altas</button>
                     <button class="filter-btn below" data-filter="below">🔴 Baixas</button>
-                    <button class="filter-btn" data-filter="both">🔄 Ambas</button>
+                    <button class="filter-btn inside" data-filter="inside">🟠 Dentro</button>
+                    <button class="filter-btn" data-filter="all">🔄 Todas</button>
                 </div>
             </div>
             <div class="status">
@@ -181,10 +183,13 @@
                 pairsToShow = currentData.above.map(p => ({...p, direction: 'above'}));
             } else if (filter === 'below') {
                 pairsToShow = currentData.below.map(p => ({...p, direction: 'below'}));
+            } else if (filter === 'inside') {
+                pairsToShow = currentData.inside.map(p => ({...p, direction: 'inside'}));
             } else {
                 pairsToShow = [
                     ...currentData.above.map(p => ({...p, direction: 'above'})),
-                    ...currentData.below.map(p => ({...p, direction: 'below'}))
+                    ...currentData.below.map(p => ({...p, direction: 'below'})),
+                    ...currentData.inside.map(p => ({...p, direction: 'inside'}))
                 ];
             }
             
@@ -192,8 +197,9 @@
             
             if (pairsToShow.length === 0) {
                 const msg = filter === 'above' ? '🟢 Nenhuma alta no ORB' : 
-                           filter === 'below' ? '🔴 Nenhuma baixa no ORB' : 
-                           '⚪ Nenhum par rompeu o ORB ainda';
+                           filter === 'below' ? ' Nenhuma baixa no ORB' :
+                           filter === 'inside' ? '🟠 Nenhuma crypto dentro do range' :
+                           '⚪ Nenhum dado disponível';
                 tableContent.innerHTML = `<div class="empty-state">${msg}. Aguarde...</div>`;
                 return;
             }
@@ -204,6 +210,7 @@
                         <tr>
                             <th>#</th>
                             <th>Par</th>
+                            <th>Status</th>
                             <th>Exchange</th>
                             <th>Preço</th>
                             <th>ORB High</th>
@@ -217,13 +224,15 @@
             
             pairsToShow.forEach((pair, index) => {
                 const directionClass = pair.direction;
-                const sign = pair.direction === 'above' ? '+' : '-';
-                const emoji = pair.direction === 'above' ? '🟢' : '🔴';
+                const sign = pair.direction === 'above' ? '+' : pair.direction === 'below' ? '-' : '';
+                const emoji = pair.direction === 'above' ? '🟢' : pair.direction === 'below' ? '🔴' : '🟠';
+                const statusText = pair.direction === 'above' ? 'ACIMA' : pair.direction === 'below' ? 'ABAIXO' : 'DENTRO';
                 
                 html += `
                     <tr>
                         <td>${index + 1}</td>
                         <td class="${directionClass}">${emoji} ${pair.symbol} <span class="session-badge">${currentData.session}</span></td>
+                        <td class="${directionClass}">${statusText}</td>
                         <td>${pair.exchange}</td>
                         <td>${formatPrice(pair.price)}</td>
                         <td>${formatPrice(pair.orb_high)}</td>
