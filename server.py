@@ -163,12 +163,12 @@ async def scan_pair(exchanges, symbol, session_key):
             'volume_24h': float(ticker.get('quoteVolume', 0) or 0),
         }
     except Exception as e:
-        print(f"❌ Erro scan_pair {symbol}: {e}", file=sys.stderr)
+        print(f" Erro scan_pair {symbol}: {e}", file=sys.stderr)
         return None
 
 async def run_full_scan(exchanges, session_key):
     try:
-        print(f"🚀 [SCAN INICIADO] Sessão: {session_key} | {len(BREAKOUT_PROP_PAIRS)} pares", file=sys.stderr)
+        print(f" [SCAN INICIADO] Sessão: {session_key} | {len(BREAKOUT_PROP_PAIRS)} pares", file=sys.stderr)
         tasks = [scan_pair(exchanges, symbol, session_key) for symbol in BREAKOUT_PROP_PAIRS]
         results = await asyncio.gather(*tasks)
         
@@ -176,14 +176,15 @@ async def run_full_scan(exchanges, session_key):
         below = sorted([r for r in results if r and r['status'] == 'ABAIXO'], key=lambda x: x['distance_pct'], reverse=True)
         inside = [r for r in results if r and r['status'] == 'DENTRO']
         
-        print(f"✅ [SCAN COMPLETO] Acima: {len(above)} | Abaixo: {len(below)} | Dentro: {len(inside)}", file=sys.stderr)
+        print(f" [SCAN COMPLETO] Acima: {len(above)} | Abaixo: {len(below)} | Dentro: {len(inside)}", file=sys.stderr)
         
         if above:
-            print(f" TOP 3 ACIMA: {[(p['symbol'], f\"+{p['distance_pct']:.2f}%\") for p in above[:3]]}", file=sys.stderr)
+            top_3 = [f"{p['symbol']} (+{p['distance_pct']:.2f}%)" for p in above[:3]]
+            print(f" TOP 3 ACIMA: {', '.join(top_3)}", file=sys.stderr)
         
         return above, below, inside
     except Exception as e:
-        print(f"❌ [ERRO SCAN] {e}", file=sys.stderr)
+        print(f" [ERRO SCAN] {e}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
         return [], [], []
@@ -191,10 +192,10 @@ async def run_full_scan(exchanges, session_key):
 async def broadcast_scan_results():
     try:
         if not connected_clients:
-            print(f"⚠️ [BROADCAST] Sem clientes conectados", file=sys.stderr)
+            print(f" [BROADCAST] Sem clientes conectados", file=sys.stderr)
             return
         
-        print(f"📡 [BROADCAST] {len(connected_clients)} cliente(s)", file=sys.stderr)
+        print(f" [BROADCAST] {len(connected_clients)} cliente(s)", file=sys.stderr)
         
         disconnected = []
         for client in connected_clients:
@@ -221,9 +222,9 @@ async def broadcast_scan_results():
                 
                 message = json.dumps(result_data, default=str)
                 await client.send_text(message)
-                print(f"✅ [ENVIADO] Dados enviados para cliente", file=sys.stderr)
+                print(f" [ENVIADO] Dados enviados para cliente", file=sys.stderr)
             except Exception as e:
-                print(f"❌ [ERRO CLIENTE] {e}", file=sys.stderr)
+                print(f" [ERRO CLIENTE] {e}", file=sys.stderr)
                 disconnected.append(client)
         
         for client in disconnected:
@@ -232,24 +233,24 @@ async def broadcast_scan_results():
             if client in client_filters:
                 del client_filters[client]
     except Exception as e:
-        print(f"❌ [ERRO BROADCAST] {e}", file=sys.stderr)
+        print(f" [ERRO BROADCAST] {e}", file=sys.stderr)
 
 async def scanner_loop():
-    print(f"🔄 [SCANNER LOOP] Iniciado", file=sys.stderr)
+    print(f" [SCANNER LOOP] Iniciado", file=sys.stderr)
     count = 0
     while True:
         try:
             count += 1
-            print(f"\n🔁 [LOOP] Iteração #{count}", file=sys.stderr)
+            print(f"\n [LOOP] Iteração #{count}", file=sys.stderr)
             await broadcast_scan_results()
         except Exception as e:
-            print(f"❌ [ERRO LOOP] {e}", file=sys.stderr)
+            print(f" [ERRO LOOP] {e}", file=sys.stderr)
         await asyncio.sleep(SCAN_INTERVAL)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 Servidor iniciando...", file=sys.stderr)
-    print("🛡️ Prioridade: OKX > Bybit > Binance", file=sys.stderr)
+    print(" Servidor iniciando...", file=sys.stderr)
+    print(" Prioridade: OKX > Bybit > Binance", file=sys.stderr)
     asyncio.create_task(scanner_loop())
     yield
 
@@ -283,18 +284,18 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_clients.append(websocket)
     client_filters[websocket] = {'session': DEFAULT_SESSION, 'filter': 'all'}
-    print(f"✅ [WEBSOCKET] Cliente conectado. Total: {len(connected_clients)}", file=sys.stderr)
+    print(f" [WEBSOCKET] Cliente conectado. Total: {len(connected_clients)}", file=sys.stderr)
     try:
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
             if 'session' in data: client_filters[websocket]['session'] = data['session']
             if 'filter' in data: client_filters[websocket]['filter'] = data['filter']
-            print(f"📥 [FILTRO] Session: {data.get('session')}, Filter: {data.get('filter')}", file=sys.stderr)
+            print(f" [FILTRO] Session: {data.get('session')}, Filter: {data.get('filter')}", file=sys.stderr)
     except WebSocketDisconnect:
         connected_clients.remove(websocket)
         if websocket in client_filters: del client_filters[websocket]
-        print(f"❌ [WEBSOCKET] Cliente desconectado", file=sys.stderr)
+        print(f" [WEBSOCKET] Cliente desconectado", file=sys.stderr)
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
