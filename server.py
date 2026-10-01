@@ -56,9 +56,10 @@ client_filters = {}
 
 async def create_exchanges():
     return {
-        'binance': ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}}),
+        # PRIORIDADE ALTERADA: Bybit e OKX primeiro (não bloqueiam nuvem)
         'bybit': ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
         'okx': ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
+        'binance': ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}}),
     }
 
 async def close_exchanges(exchanges):
@@ -67,7 +68,11 @@ async def close_exchanges(exchanges):
 
 async def get_best_exchange_for_pair(exchanges, symbol):
     candidates = []
-    for ex_id, ex in exchanges.items():
+    # Força a ordem de tentativa: Bybit -> OKX -> Binance
+    exchange_order = ['bybit', 'okx', 'binance']
+    
+    for ex_id in exchange_order:
+        ex = exchanges[ex_id]
         try:
             ticker = await ex.fetch_ticker(symbol)
             if ticker and ticker.get('quoteVolume'):
@@ -77,10 +82,17 @@ async def get_best_exchange_for_pair(exchanges, symbol):
                     'volume': float(ticker['quoteVolume'] or 0)
                 })
         except Exception as e:
-            print(f"️ Erro ao buscar ticker de {symbol} em {ex_id}: {e}")
+            error_msg = str(e)
+            # Se for o bloqueio 451 da Binance, ignora silenciosamente e pula para a próxima
+            if "451" in error_msg or "restricted location" in error_msg:
+                continue
+            # Qualquer outro erro, também pula para a próxima exchange
             continue
+            
     if not candidates:
         return None, None
+        
+    # Ordena pelo maior volume
     candidates.sort(key=lambda x: x['volume'], reverse=True)
     best = candidates[0]
     return best['exchange'], best['ticker']
@@ -103,44 +115,36 @@ def get_session_start_utc(session_key):
 
 async def calculate_orb(exchange, symbol, session_key):
     try:
-        print(f"🔎 [DEBUG] Calculando ORB para {symbol} na sessão {session_key}")
-        
         session_start_ms, session_start_dt = get_session_start_utc(session_key)
-        print(f"🔎 [DEBUG] {symbol} | Timestamp início sessão: {session_start_ms} | Data: {session_start_dt}")
         
+        # Busca candles de 5min a partir do início da sessão
         ohlcv = await exchange.fetch_ohlcv(symbol, '5m', since=session_start_ms, limit=4)
-        print(f"🔎 [DEBUG] {symbol} | Candles retornados: {len(ohlcv) if ohlcv else 0}")
         
         if not ohlcv or len(ohlcv) < 2:
-            print(f"⚠️ [DEBUG] {symbol} | Menos de 2 candles, retornando None")
             return None
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        orb_candles = df.head(2)
+        orb_candles = df.head(2) # 2 candles de 5min = 10 minutos
         
         orb_high = float(orb_candles['high'].max())
         orb_low = float(orb_candles['low'].min())
         current_price = float(df.iloc[-1]['close'])
         
-        print(f"✅ [DEBUG] {symbol} | ORB High: {orb_high} | ORB Low: {orb_low} | Preço: {current_price}")
+        # DEBUG: Mostra qual exchange foi usada e os valores
+        if symbol == 'BTC/USDT:USDT':
+            print(f"✅ [DEBUG BTC] Exchange usada: {exchange.name} | ORB High: {orb_high} | ORB Low: {orb_low} | Preço: {current_price}")
         
         return {'orb_high': orb_high, 'orb_low': orb_low, 'price': current_price}
     except Exception as e:
-        print(f"❌ [DEBUG] Erro ao calcular ORB para {symbol}: {e}")
-        import traceback
-        traceback.print_exc()
         return None
 
 async def scan_pair(exchanges, symbol, session_key):
-    print(f" [DEBUG] Escaneando {symbol}")
     ex_id, ticker = await get_best_exchange_for_pair(exchanges, symbol)
     if not ticker:
-        print(f"⚠️ [DEBUG] {symbol} | Exchange não encontrada")
         return None
     exchange = exchanges[ex_id]
     orb_data = await calculate_orb(exchange, symbol, session_key)
     if not orb_data:
-        print(f"⚠️ [DEBUG] {symbol} | ORB data é None")
         return None
     
     price = orb_data['price']
@@ -162,7 +166,7 @@ async def scan_pair(exchanges, symbol, session_key):
         
     return {
         'symbol': symbol.replace('/USDT:USDT', ''),
-        'exchange': ex_id,
+        'exchange': ex_id.upper(),
         'price': price,
         'orb_high': orb_high,
         'orb_low': orb_low,
@@ -172,15 +176,12 @@ async def scan_pair(exchanges, symbol, session_key):
     }
 
 async def run_full_scan(exchanges, session_key):
-    print(f"🚀 [DEBUG] Iniciando scan completo para sessão {session_key}")
     tasks = [scan_pair(exchanges, symbol, session_key) for symbol in BREAKOUT_PROP_PAIRS]
     results = await asyncio.gather(*tasks)
     
     above = sorted([r for r in results if r and r['status'] == 'ACIMA'], key=lambda x: x['distance_pct'], reverse=True)
     below = sorted([r for r in results if r and r['status'] == 'ABAIXO'], key=lambda x: x['distance_pct'], reverse=True)
     inside = [r for r in results if r and r['status'] == 'DENTRO']
-    
-    print(f"📊 [DEBUG] Scan completo: {len(above)} acima, {len(below)} abaixo, {len(inside)} dentro")
     
     return above, below, inside
 
@@ -214,7 +215,6 @@ async def broadcast_scan_results():
             message = json.dumps(result_data, default=str)
             await client.send_text(message)
         except Exception as e:
-            print(f"❌ Erro ao enviar para cliente: {e}")
             disconnected.append(client)
     
     for client in disconnected:
@@ -234,8 +234,7 @@ async def scanner_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 Servidor iniciando...")
-    print("📅 Sessões ORB: 21:00 BRT (00:00 UTC) | 10:30 BRT (13:30 UTC)")
-    print("📊 Timeframe do ORB: 5 minutos (2 candles = 10 min)")
+    print("🛡️ Prioridade de Exchange: Bybit > OKX > Binance (para evitar bloqueio de IP)")
     asyncio.create_task(scanner_loop())
     yield
 
@@ -244,7 +243,6 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/candles/{symbol}")
 async def get_candles(symbol: str, timeframe: str = "5m", limit: int = 200):
     cache_key = f"{symbol}_{timeframe}_{limit}"
-    
     if cache_key in candles_cache:
         cached_time, cached_data = candles_cache[cache_key]
         if (datetime.now() - cached_time).seconds < 30:
@@ -260,16 +258,7 @@ async def get_candles(symbol: str, timeframe: str = "5m", limit: int = 200):
         await close_exchanges(exchanges)
         if not ohlcv:
             return {"error": "Sem dados"}
-        candles = []
-        for c in ohlcv:
-            candles.append({
-                'time': int(c[0] / 1000),
-                'open': float(c[1]),
-                'high': float(c[2]),
-                'low': float(c[3]),
-                'close': float(c[4]),
-                'volume': float(c[5]),
-            })
+        candles = [{'time': int(c[0] / 1000), 'open': float(c[1]), 'high': float(c[2]), 'low': float(c[3]), 'close': float(c[4]), 'volume': float(c[5])} for c in ohlcv]
         result = {'symbol': symbol, 'timeframe': timeframe, 'candles': candles}
         candles_cache[cache_key] = (datetime.now(), result)
         return result
@@ -285,14 +274,11 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
-            if 'session' in data:
-                client_filters[websocket]['session'] = data['session']
-            if 'filter' in data:
-                client_filters[websocket]['filter'] = data['filter']
+            if 'session' in data: client_filters[websocket]['session'] = data['session']
+            if 'filter' in data: client_filters[websocket]['filter'] = data['filter']
     except WebSocketDisconnect:
         connected_clients.remove(websocket)
-        if websocket in client_filters:
-            del client_filters[websocket]
+        if websocket in client_filters: del client_filters[websocket]
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
