@@ -52,6 +52,9 @@ client_filters = {}
 # ══════════════════════════════════════════════════════════════
 async def create_exchanges():
     return {
+        # MEXC e GATE.IO adicionados no topo (APIs públicas muito mais permissivas com IPs de nuvem)
+        'mexc': ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
+        'gateio': ccxt.gateio({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
         'okx': ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
         'bybit': ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
         'binance': ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}}),
@@ -63,7 +66,8 @@ async def close_exchanges(exchanges):
 
 async def get_best_exchange_for_pair(exchanges, symbol):
     candidates = []
-    exchange_order = ['okx', 'bybit', 'binance']
+    # Nova ordem de prioridade para evitar bloqueios de IP
+    exchange_order = ['mexc', 'gateio', 'okx', 'bybit', 'binance']
     
     for ex_id in exchange_order:
         ex = exchanges[ex_id]
@@ -75,9 +79,14 @@ async def get_best_exchange_for_pair(exchanges, symbol):
                     'ticker': ticker,
                     'volume': float(ticker['quoteVolume'] or 0)
                 })
-                print(f"✅ {symbol} | {ex_id.upper()} funcionou | Volume: {ticker['quoteVolume']}", file=sys.stderr)
+                print(f"✅ {symbol} | {ex_id.upper()} funcionou | Vol: {ticker['quoteVolume']}", file=sys.stderr)
         except Exception as e:
-            print(f" {symbol} | {ex_id.upper()} falhou: {str(e)[:80]}", file=sys.stderr)
+            # Silencia erros de bloqueio de IP para não poluir o log, mas registra a falha
+            err_msg = str(e)
+            if "451" in err_msg or "403" in err_msg or "restricted" in err_msg.lower():
+                print(f"⛔ {symbol} | {ex_id.upper()} bloqueou o IP", file=sys.stderr)
+            else:
+                print(f" {symbol} | {ex_id.upper()} falhou: {err_msg[:60]}", file=sys.stderr)
             continue
             
     if not candidates:
@@ -106,14 +115,10 @@ def get_session_start_utc(session_key):
 async def calculate_orb(exchange, symbol, session_key):
     try:
         session_start_ms, session_start_dt = get_session_start_utc(session_key)
-        print(f"🔍 {symbol} | Buscando candles desde {session_start_dt.strftime('%H:%M UTC')}", file=sys.stderr)
         
         ohlcv = await exchange.fetch_ohlcv(symbol, '5m', since=session_start_ms, limit=4)
         
-        print(f"📊 {symbol} | Candles retornados: {len(ohlcv) if ohlcv else 0}", file=sys.stderr)
-        
         if not ohlcv or len(ohlcv) < 2:
-            print(f"⚠️ {symbol} | Menos de 2 candles", file=sys.stderr)
             return None
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -123,11 +128,8 @@ async def calculate_orb(exchange, symbol, session_key):
         orb_low = float(orb_candles['low'].min())
         current_price = float(df.iloc[-1]['close'])
         
-        print(f"✅ {symbol} | ORB High: {orb_high} | Low: {orb_low} | Preço: {current_price}", file=sys.stderr)
-        
         return {'orb_high': orb_high, 'orb_low': orb_low, 'price': current_price}
     except Exception as e:
-        print(f"❌ {symbol} | Erro calculate_orb: {e}", file=sys.stderr)
         return None
 
 async def scan_pair(exchanges, symbol, session_key):
@@ -168,7 +170,6 @@ async def scan_pair(exchanges, symbol, session_key):
             'volume_24h': float(ticker.get('quoteVolume', 0) or 0),
         }
     except Exception as e:
-        print(f"❌ {symbol} | Erro scan_pair: {e}", file=sys.stderr)
         return None
 
 async def run_full_scan(exchanges, session_key):
@@ -183,10 +184,6 @@ async def run_full_scan(exchanges, session_key):
         
         print(f"✅ [SCAN] Acima: {len(above)} | Abaixo: {len(below)} | Dentro: {len(inside)}", file=sys.stderr)
         
-        if above:
-            top_3 = [f"{p['symbol']} (+{p['distance_pct']:.2f}%)" for p in above[:3]]
-            print(f"📊 TOP 3 ACIMA: {', '.join(top_3)}", file=sys.stderr)
-        
         return above, below, inside
     except Exception as e:
         print(f"❌ [ERRO SCAN] {e}", file=sys.stderr)
@@ -198,7 +195,7 @@ async def run_full_scan(exchanges, session_key):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 Servidor iniciando...", file=sys.stderr)
-    print("️ Prioridade: OKX > Bybit > Binance", file=sys.stderr)
+    print("🛡️ Prioridade: MEXC > GATE.IO > OKX (Anti-bloqueio de IP)", file=sys.stderr)
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -208,7 +205,6 @@ app = FastAPI(lifespan=lifespan)
 # ══════════════════════════════════════════════════════════════
 @app.get("/api/scan")
 async def api_scan():
-    """Retorna os dados do scan via HTTP (polling a cada 15s)"""
     try:
         print(f"📡 [API SCAN] Requisição recebida", file=sys.stderr)
         exchanges = await create_exchanges()
@@ -259,15 +255,11 @@ async def serve_frontend():
     with open("index.html", "r", encoding="utf-8") as f:
         return f.read()
 
-# ══════════════════════════════════════════════════════════════
-# WEBSOCKET (fallback)
-# ══════════════════════════════════════════════════════════════
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_clients.append(websocket)
     client_filters[websocket] = {'session': DEFAULT_SESSION, 'filter': 'all'}
-    print(f"✅ [WS] Cliente conectado. Total: {len(connected_clients)}", file=sys.stderr)
     try:
         while True:
             message = await websocket.receive_text()
@@ -277,11 +269,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         connected_clients.remove(websocket)
         if websocket in client_filters: del client_filters[websocket]
-        print(f"❌ [WS] Cliente desconectado", file=sys.stderr)
 
-# ═════════════════════════════════════════════════════════════
-# INICIALIZAÇÃO
-# ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
