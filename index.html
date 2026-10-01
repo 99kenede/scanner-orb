@@ -111,51 +111,38 @@
             </div>
             <div class="status">
                 <div class="status-dot"></div>
-                <span id="lastUpdate">Conectando...</span>
+                <span id="lastUpdate">Carregando...</span>
             </div>
         </div>
     </div>
     
     <div class="table-container">
         <div id="tableContent">
-            <div class="empty-state">Aguardando dados...</div>
+            <div class="empty-state">Carregando dados...</div>
         </div>
     </div>
 
     <script>
-        let ws;
         let currentData = null;
         let session = '21:00';
         let filter = 'above';
 
-        const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-        const wsProtocol = isLocal ? 'ws' : 'wss';
-        const portSuffix = isLocal ? ':8000' : '';
-
-        function connectWebSocket() {
-            ws = new WebSocket(`${wsProtocol}://${window.location.hostname}${portSuffix}/ws`);
-            ws.onopen = () => {
-                console.log('WebSocket conectado');
-                document.getElementById('lastUpdate').textContent = 'Conectado';
-                sendConfig();
-            };
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
+        // POLLING HTTP - busca dados a cada 15 segundos
+        async function fetchData() {
+            try {
+                const response = await fetch('/api/scan');
+                const data = await response.json();
+                
+                if (data.error) {
+                    console.error('Erro:', data.error);
+                    return;
+                }
+                
                 currentData = data;
                 document.getElementById('lastUpdate').textContent = `Atualizado: ${data.updated} | Sessão: ${data.session}`;
                 renderTable();
-            };
-            ws.onclose = () => {
-                console.log('WebSocket desconectado, reconectando...');
-                document.getElementById('lastUpdate').textContent = 'Reconectando...';
-                setTimeout(connectWebSocket, 3000);
-            };
-            ws.onerror = (error) => { console.error('WebSocket erro:', error); };
-        }
-
-        function sendConfig() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ session: session, filter: filter }));
+            } catch (error) {
+                console.error('Erro ao buscar dados:', error);
             }
         }
 
@@ -197,7 +184,7 @@
             
             if (pairsToShow.length === 0) {
                 const msg = filter === 'above' ? '🟢 Nenhuma alta no ORB' : 
-                           filter === 'below' ? ' Nenhuma baixa no ORB' :
+                           filter === 'below' ? '🔴 Nenhuma baixa no ORB' :
                            filter === 'inside' ? '🟠 Nenhuma crypto dentro do range' :
                            '⚪ Nenhum dado disponível';
                 tableContent.innerHTML = `<div class="empty-state">${msg}. Aguarde...</div>`;
@@ -225,7 +212,7 @@
             pairsToShow.forEach((pair, index) => {
                 const directionClass = pair.direction;
                 const sign = pair.direction === 'above' ? '+' : pair.direction === 'below' ? '-' : '';
-                const emoji = pair.direction === 'above' ? '🟢' : pair.direction === 'below' ? '🔴' : '🟠';
+                const emoji = pair.direction === 'above' ? '' : pair.direction === 'below' ? '' : '🟠';
                 const statusText = pair.direction === 'above' ? 'ACIMA' : pair.direction === 'below' ? 'ABAIXO' : 'DENTRO';
                 
                 html += `
@@ -247,17 +234,19 @@
             tableContent.innerHTML = html;
         }
 
-        document.getElementById('session').addEventListener('change', (e) => { session = e.target.value; sendConfig(); });
+        document.getElementById('session').addEventListener('change', (e) => { session = e.target.value; });
         document.querySelectorAll('.filter-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
                 e.target.classList.add('active');
                 filter = e.target.dataset.filter;
-                sendConfig();
+                renderTable();
             });
         });
 
-        connectWebSocket();
+        // Inicia polling
+        fetchData();
+        setInterval(fetchData, 15000); // Atualiza a cada 15 segundos
     </script>
 </body>
 </html>
