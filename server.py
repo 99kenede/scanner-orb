@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 import json
 import os
+import sys
 
 # ══════════════════════════════════════════════════════════════
 # CONFIGURAÇÕES
@@ -56,7 +57,6 @@ client_filters = {}
 
 async def create_exchanges():
     return {
-        # ORDEM DE PRIORIDADE: OKX (mais permissiva) > Bybit > Binance
         'okx': ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
         'bybit': ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
         'binance': ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}}),
@@ -81,7 +81,6 @@ async def get_best_exchange_for_pair(exchanges, symbol):
                     'volume': float(ticker['quoteVolume'] or 0)
                 })
         except Exception:
-            # Se der QUALQUER erro (451, 403, par não existe), ignora e tenta a próxima
             continue
             
     if not candidates:
@@ -121,112 +120,136 @@ async def calculate_orb(exchange, symbol, session_key):
         orb_low = float(orb_candles['low'].min())
         current_price = float(df.iloc[-1]['close'])
         
-        if symbol == 'BTC/USDT:USDT':
-            print(f"✅ [DEBUG BTC] Exchange: {exchange.name.upper()} | High: {orb_high} | Low: {orb_low} | Preço: {current_price}")
-        
         return {'orb_high': orb_high, 'orb_low': orb_low, 'price': current_price}
-    except Exception:
+    except Exception as e:
+        print(f" Erro calculate_orb {symbol}: {e}", file=sys.stderr)
         return None
 
 async def scan_pair(exchanges, symbol, session_key):
-    ex_id, ticker = await get_best_exchange_for_pair(exchanges, symbol)
-    
-    if not ticker:
-        if symbol == 'BTC/USDT:USDT':
-            print(f"❌ [DEBUG BTC] NENHUMA exchange funcionou para este par.")
-        return None
+    try:
+        ex_id, ticker = await get_best_exchange_for_pair(exchanges, symbol)
         
-    exchange = exchanges[ex_id]
-    orb_data = await calculate_orb(exchange, symbol, session_key)
-    
-    if not orb_data:
-        return None
-    
-    price = orb_data['price']
-    orb_high = orb_data['orb_high']
-    orb_low = orb_data['orb_low']
-    
-    if price > orb_high:
-        status = 'ACIMA'
-        distance_pct = ((price - orb_high) / orb_high) * 100
-    elif price < orb_low:
-        status = 'ABAIXO'
-        distance_pct = ((orb_low - price) / orb_low) * 100
-    else:
-        status = 'DENTRO'
-        distance_pct = 0
+        if not ticker:
+            return None
+            
+        exchange = exchanges[ex_id]
+        orb_data = await calculate_orb(exchange, symbol, session_key)
         
-    return {
-        'symbol': symbol.replace('/USDT:USDT', ''),
-        'exchange': ex_id.upper(),
-        'price': price,
-        'orb_high': orb_high,
-        'orb_low': orb_low,
-        'status': status,
-        'distance_pct': distance_pct,
-        'volume_24h': float(ticker.get('quoteVolume', 0) or 0),
-    }
+        if not orb_data:
+            return None
+        
+        price = orb_data['price']
+        orb_high = orb_data['orb_high']
+        orb_low = orb_data['orb_low']
+        
+        if price > orb_high:
+            status = 'ACIMA'
+            distance_pct = ((price - orb_high) / orb_high) * 100
+        elif price < orb_low:
+            status = 'ABAIXO'
+            distance_pct = ((orb_low - price) / orb_low) * 100
+        else:
+            status = 'DENTRO'
+            distance_pct = 0
+            
+        return {
+            'symbol': symbol.replace('/USDT:USDT', ''),
+            'exchange': ex_id.upper(),
+            'price': price,
+            'orb_high': orb_high,
+            'orb_low': orb_low,
+            'status': status,
+            'distance_pct': distance_pct,
+            'volume_24h': float(ticker.get('quoteVolume', 0) or 0),
+        }
+    except Exception as e:
+        print(f"❌ Erro scan_pair {symbol}: {e}", file=sys.stderr)
+        return None
 
 async def run_full_scan(exchanges, session_key):
-    tasks = [scan_pair(exchanges, symbol, session_key) for symbol in BREAKOUT_PROP_PAIRS]
-    results = await asyncio.gather(*tasks)
-    
-    above = sorted([r for r in results if r and r['status'] == 'ACIMA'], key=lambda x: x['distance_pct'], reverse=True)
-    below = sorted([r for r in results if r and r['status'] == 'ABAIXO'], key=lambda x: x['distance_pct'], reverse=True)
-    inside = [r for r in results if r and r['status'] == 'DENTRO']
-    
-    return above, below, inside
+    try:
+        print(f"🚀 [SCAN INICIADO] Sessão: {session_key} | {len(BREAKOUT_PROP_PAIRS)} pares", file=sys.stderr)
+        tasks = [scan_pair(exchanges, symbol, session_key) for symbol in BREAKOUT_PROP_PAIRS]
+        results = await asyncio.gather(*tasks)
+        
+        above = sorted([r for r in results if r and r['status'] == 'ACIMA'], key=lambda x: x['distance_pct'], reverse=True)
+        below = sorted([r for r in results if r and r['status'] == 'ABAIXO'], key=lambda x: x['distance_pct'], reverse=True)
+        inside = [r for r in results if r and r['status'] == 'DENTRO']
+        
+        print(f"✅ [SCAN COMPLETO] Acima: {len(above)} | Abaixo: {len(below)} | Dentro: {len(inside)}", file=sys.stderr)
+        
+        if above:
+            print(f" TOP 3 ACIMA: {[(p['symbol'], f\"+{p['distance_pct']:.2f}%\") for p in above[:3]]}", file=sys.stderr)
+        
+        return above, below, inside
+    except Exception as e:
+        print(f"❌ [ERRO SCAN] {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return [], [], []
 
 async def broadcast_scan_results():
-    if not connected_clients:
-        return
-    
-    disconnected = []
-    for client in connected_clients:
-        try:
-            filters = client_filters.get(client, {'session': DEFAULT_SESSION, 'filter': 'all'})
-            session_key = filters['session']
-            filter_type = filters['filter']
-            
-            exchanges = await create_exchanges()
-            above, below, inside = await run_full_scan(exchanges, session_key)
-            await close_exchanges(exchanges)
-            
-            if filter_type == 'above':
-                result_data = {'above': above, 'below': [], 'inside': []}
-            elif filter_type == 'below':
-                result_data = {'above': [], 'below': below, 'inside': []}
-            elif filter_type == 'inside':
-                result_data = {'above': [], 'below': [], 'inside': inside}
-            else:
-                result_data = {'above': above, 'below': below, 'inside': inside}
-            
-            result_data['updated'] = datetime.now().strftime("%H:%M:%S")
-            result_data['session'] = session_key
-            
-            message = json.dumps(result_data, default=str)
-            await client.send_text(message)
-        except Exception:
-            disconnected.append(client)
-    
-    for client in disconnected:
-        if client in connected_clients:
-            connected_clients.remove(client)
-        if client in client_filters:
-            del client_filters[client]
+    try:
+        if not connected_clients:
+            print(f"⚠️ [BROADCAST] Sem clientes conectados", file=sys.stderr)
+            return
+        
+        print(f"📡 [BROADCAST] {len(connected_clients)} cliente(s)", file=sys.stderr)
+        
+        disconnected = []
+        for client in connected_clients:
+            try:
+                filters = client_filters.get(client, {'session': DEFAULT_SESSION, 'filter': 'all'})
+                session_key = filters['session']
+                filter_type = filters['filter']
+                
+                exchanges = await create_exchanges()
+                above, below, inside = await run_full_scan(exchanges, session_key)
+                await close_exchanges(exchanges)
+                
+                if filter_type == 'above':
+                    result_data = {'above': above, 'below': [], 'inside': []}
+                elif filter_type == 'below':
+                    result_data = {'above': [], 'below': below, 'inside': []}
+                elif filter_type == 'inside':
+                    result_data = {'above': [], 'below': [], 'inside': inside}
+                else:
+                    result_data = {'above': above, 'below': below, 'inside': inside}
+                
+                result_data['updated'] = datetime.now().strftime("%H:%M:%S")
+                result_data['session'] = session_key
+                
+                message = json.dumps(result_data, default=str)
+                await client.send_text(message)
+                print(f"✅ [ENVIADO] Dados enviados para cliente", file=sys.stderr)
+            except Exception as e:
+                print(f"❌ [ERRO CLIENTE] {e}", file=sys.stderr)
+                disconnected.append(client)
+        
+        for client in disconnected:
+            if client in connected_clients:
+                connected_clients.remove(client)
+            if client in client_filters:
+                del client_filters[client]
+    except Exception as e:
+        print(f"❌ [ERRO BROADCAST] {e}", file=sys.stderr)
 
 async def scanner_loop():
+    print(f"🔄 [SCANNER LOOP] Iniciado", file=sys.stderr)
+    count = 0
     while True:
         try:
+            count += 1
+            print(f"\n🔁 [LOOP] Iteração #{count}", file=sys.stderr)
             await broadcast_scan_results()
         except Exception as e:
-            print(f"Erro no loop: {e}")
+            print(f"❌ [ERRO LOOP] {e}", file=sys.stderr)
         await asyncio.sleep(SCAN_INTERVAL)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 Servidor iniciando...")
-    print("🛡️ Prioridade: OKX > Bybit > Binance (Anti-bloqueio)")
+    print("🚀 Servidor iniciando...", file=sys.stderr)
+    print("🛡️ Prioridade: OKX > Bybit > Binance", file=sys.stderr)
     asyncio.create_task(scanner_loop())
     yield
 
@@ -260,15 +283,18 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_clients.append(websocket)
     client_filters[websocket] = {'session': DEFAULT_SESSION, 'filter': 'all'}
+    print(f"✅ [WEBSOCKET] Cliente conectado. Total: {len(connected_clients)}", file=sys.stderr)
     try:
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
             if 'session' in data: client_filters[websocket]['session'] = data['session']
             if 'filter' in data: client_filters[websocket]['filter'] = data['filter']
+            print(f"📥 [FILTRO] Session: {data.get('session')}, Filter: {data.get('filter')}", file=sys.stderr)
     except WebSocketDisconnect:
         connected_clients.remove(websocket)
         if websocket in client_filters: del client_filters[websocket]
+        print(f"❌ [WEBSOCKET] Cliente desconectado", file=sys.stderr)
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
