@@ -52,9 +52,9 @@ client_filters = {}
 # ══════════════════════════════════════════════════════════════
 async def create_exchanges():
     return {
-        # MEXC e GATE.IO adicionados no topo (APIs públicas muito mais permissivas com IPs de nuvem)
+        # MEXC e GATE no topo (APIs públicas muito mais permissivas com IPs de nuvem)
         'mexc': ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
-        'gateio': ccxt.gateio({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
+        'gate': ccxt.gate({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
         'okx': ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
         'bybit': ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
         'binance': ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}}),
@@ -66,8 +66,8 @@ async def close_exchanges(exchanges):
 
 async def get_best_exchange_for_pair(exchanges, symbol):
     candidates = []
-    # Nova ordem de prioridade para evitar bloqueios de IP
-    exchange_order = ['mexc', 'gateio', 'okx', 'bybit', 'binance']
+    # Ordem de prioridade para evitar bloqueios de IP
+    exchange_order = ['mexc', 'gate', 'okx', 'bybit', 'binance']
     
     for ex_id in exchange_order:
         ex = exchanges[ex_id]
@@ -81,12 +81,11 @@ async def get_best_exchange_for_pair(exchanges, symbol):
                 })
                 print(f"✅ {symbol} | {ex_id.upper()} funcionou | Vol: {ticker['quoteVolume']}", file=sys.stderr)
         except Exception as e:
-            # Silencia erros de bloqueio de IP para não poluir o log, mas registra a falha
             err_msg = str(e)
             if "451" in err_msg or "403" in err_msg or "restricted" in err_msg.lower():
                 print(f"⛔ {symbol} | {ex_id.upper()} bloqueou o IP", file=sys.stderr)
             else:
-                print(f" {symbol} | {ex_id.upper()} falhou: {err_msg[:60]}", file=sys.stderr)
+                print(f"❌ {symbol} | {ex_id.upper()} falhou: {err_msg[:60]}", file=sys.stderr)
             continue
             
     if not candidates:
@@ -130,6 +129,7 @@ async def calculate_orb(exchange, symbol, session_key):
         
         return {'orb_high': orb_high, 'orb_low': orb_low, 'price': current_price}
     except Exception as e:
+        print(f"❌ {symbol} | Erro calculate_orb: {e}", file=sys.stderr)
         return None
 
 async def scan_pair(exchanges, symbol, session_key):
@@ -170,6 +170,7 @@ async def scan_pair(exchanges, symbol, session_key):
             'volume_24h': float(ticker.get('quoteVolume', 0) or 0),
         }
     except Exception as e:
+        print(f"❌ {symbol} | Erro scan_pair: {e}", file=sys.stderr)
         return None
 
 async def run_full_scan(exchanges, session_key):
@@ -184,6 +185,10 @@ async def run_full_scan(exchanges, session_key):
         
         print(f"✅ [SCAN] Acima: {len(above)} | Abaixo: {len(below)} | Dentro: {len(inside)}", file=sys.stderr)
         
+        if above:
+            top_3 = [f"{p['symbol']} (+{p['distance_pct']:.2f}%)" for p in above[:3]]
+            print(f"📊 TOP 3 ACIMA: {', '.join(top_3)}", file=sys.stderr)
+        
         return above, below, inside
     except Exception as e:
         print(f"❌ [ERRO SCAN] {e}", file=sys.stderr)
@@ -195,7 +200,7 @@ async def run_full_scan(exchanges, session_key):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 Servidor iniciando...", file=sys.stderr)
-    print("🛡️ Prioridade: MEXC > GATE.IO > OKX (Anti-bloqueio de IP)", file=sys.stderr)
+    print("🛡️ Prioridade: MEXC > GATE > OKX > BYBIT > BINANCE", file=sys.stderr)
     yield
 
 app = FastAPI(lifespan=lifespan)
