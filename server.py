@@ -52,7 +52,6 @@ client_filters = {}
 # ══════════════════════════════════════════════════════════════
 async def create_exchanges():
     return {
-        # MEXC e GATE no topo (APIs públicas muito mais permissivas com IPs de nuvem)
         'mexc': ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
         'gate': ccxt.gate({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
         'okx': ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
@@ -66,7 +65,6 @@ async def close_exchanges(exchanges):
 
 async def get_best_exchange_for_pair(exchanges, symbol):
     candidates = []
-    # Ordem de prioridade para evitar bloqueios de IP
     exchange_order = ['mexc', 'gate', 'okx', 'bybit', 'binance']
     
     for ex_id in exchange_order:
@@ -79,7 +77,6 @@ async def get_best_exchange_for_pair(exchanges, symbol):
                     'ticker': ticker,
                     'volume': float(ticker['quoteVolume'] or 0)
                 })
-                print(f"✅ {symbol} | {ex_id.upper()} funcionou | Vol: {ticker['quoteVolume']}", file=sys.stderr)
         except Exception as e:
             err_msg = str(e)
             if "451" in err_msg or "403" in err_msg or "restricted" in err_msg.lower():
@@ -112,24 +109,47 @@ def get_session_start_utc(session_key):
     return int(session_start.timestamp() * 1000), session_start
 
 async def calculate_orb(exchange, symbol, session_key):
+    """
+    Calcula o ORB buscando TODOS os candles desde o início da sessão.
+    ORB = High/Low dos primeiros 10 minutos (2 candles de 5min).
+    Preço atual = último candle recebido.
+    """
     try:
         session_start_ms, session_start_dt = get_session_start_utc(session_key)
         
-        ohlcv = await exchange.fetch_ohlcv(symbol, '5m', since=session_start_ms, limit=4)
+        # Calcular quantos minutos se passaram desde o início da sessão
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        minutes_passed = (now_ms - session_start_ms) // 60000
+        
+        # Precisamos de TODOS os candles desde o início da sessão
+        # Cada candle de 5min = precisamos de (minutes_passed / 5) candles
+        candles_needed = max(20, int(minutes_passed / 5) + 10)
+        
+        # Buscar TODOS os candles desde o início da sessão
+        ohlcv = await exchange.fetch_ohlcv(symbol, '5m', since=session_start_ms, limit=candles_needed)
         
         if not ohlcv or len(ohlcv) < 2:
             return None
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        
+        # Os PRIMEIROS 2 candles (10 minutos) são o ORB
         orb_candles = df.head(2)
         
+        # Preço atual é o ÚLTIMO candle
+        current_price = float(df.iloc[-1]['close'])
         orb_high = float(orb_candles['high'].max())
         orb_low = float(orb_candles['low'].min())
-        current_price = float(df.iloc[-1]['close'])
+        
+        # Debug apenas para BTC
+        if symbol == 'BTC/USDT:USDT':
+            print(f"🔍 BTC | Sessão: {session_key} | Início: {session_start_dt.strftime('%H:%M UTC')}", file=sys.stderr)
+            print(f"📊 BTC | Minutos passados: {minutes_passed} | Candles buscados: {len(ohlcv)}", file=sys.stderr)
+            print(f"✅ BTC | ORB High: {orb_high} | Low: {orb_low} | Preço ATUAL: {current_price}", file=sys.stderr)
         
         return {'orb_high': orb_high, 'orb_low': orb_low, 'price': current_price}
     except Exception as e:
-        print(f"❌ {symbol} | Erro calculate_orb: {e}", file=sys.stderr)
+        print(f" {symbol} | Erro calculate_orb: {e}", file=sys.stderr)
         return None
 
 async def scan_pair(exchanges, symbol, session_key):
@@ -170,7 +190,6 @@ async def scan_pair(exchanges, symbol, session_key):
             'volume_24h': float(ticker.get('quoteVolume', 0) or 0),
         }
     except Exception as e:
-        print(f"❌ {symbol} | Erro scan_pair: {e}", file=sys.stderr)
         return None
 
 async def run_full_scan(exchanges, session_key):
