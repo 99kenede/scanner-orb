@@ -11,13 +11,13 @@ import os
 
 # ══════════════════════════════════════════════════════════════
 # CONFIGURAÇÕES
-# ═══════════════════════════════════════════════════════════════
-ORB_MINUTES = 10  # ORB de 10 minutos (2 candles de 5min)
+# ══════════════════════════════════════════════════════════════
+ORB_MINUTES = 10
 SCAN_INTERVAL = 15
 
 ORB_SESSIONS = {
-    '21:00': time(0, 0, 0),      # 21:00 BRT = 00:00 UTC
-    '10:30': time(13, 30, 0),    # 10:30 BRT = 13:30 UTC
+    '21:00': time(0, 0, 0),
+    '10:30': time(13, 30, 0),
 }
 
 DEFAULT_SESSION = '21:00'
@@ -54,9 +54,6 @@ candles_cache = {}
 connected_clients = []
 client_filters = {}
 
-# ══════════════════════════════════════════════════════════════
-# FUNÇÕES AUXILIARES
-# ═══════════════════════════════════════════════════════════════
 async def create_exchanges():
     return {
         'binance': ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}}),
@@ -79,7 +76,8 @@ async def get_best_exchange_for_pair(exchanges, symbol):
                     'ticker': ticker,
                     'volume': float(ticker['quoteVolume'] or 0)
                 })
-        except:
+        except Exception as e:
+            print(f"️ Erro ao buscar ticker de {symbol} em {ex_id}: {e}")
             continue
     if not candidates:
         return None, None
@@ -88,7 +86,6 @@ async def get_best_exchange_for_pair(exchanges, symbol):
     return best['exchange'], best['ticker']
 
 def get_session_start_utc(session_key):
-    """Retorna o timestamp UTC (em ms) do início da sessão mais recente"""
     session_time = ORB_SESSIONS[session_key]
     now_utc = datetime.now(timezone.utc)
     
@@ -99,55 +96,51 @@ def get_session_start_utc(session_key):
         microsecond=0
     )
     
-    # Se o horário atual é antes do início da sessão hoje, usa ontem
     if now_utc < session_start:
         session_start = session_start - pd.Timedelta(days=1)
     
-    # Converte para timestamp em milissegundos (formato que o ccxt usa)
     return int(session_start.timestamp() * 1000), session_start
 
 async def calculate_orb(exchange, symbol, session_key):
-    """
-    Calcula o ORB usando candles de 5 minutos.
-    2 candles de 5min = 10 minutos de ORB.
-    Busca diretamente do timestamp do início da sessão.
-    """
     try:
-        # Pega o timestamp exato do início da sessão
+        print(f"🔎 [DEBUG] Calculando ORB para {symbol} na sessão {session_key}")
+        
         session_start_ms, session_start_dt = get_session_start_utc(session_key)
+        print(f"🔎 [DEBUG] {symbol} | Timestamp início sessão: {session_start_ms} | Data: {session_start_dt}")
         
-        # BUSCA CANDLES DE 5 MINUTOS a partir do início da sessão
-        # limit=4 para garantir que pegamos pelo menos 2 candles (10 minutos)
         ohlcv = await exchange.fetch_ohlcv(symbol, '5m', since=session_start_ms, limit=4)
+        print(f"🔎 [DEBUG] {symbol} | Candles retornados: {len(ohlcv) if ohlcv else 0}")
         
-        if not ohlcv or len(ohlcv) < 2:  # Precisa de pelo menos 2 candles (10 minutos)
+        if not ohlcv or len(ohlcv) < 2:
+            print(f"⚠️ [DEBUG] {symbol} | Menos de 2 candles, retornando None")
             return None
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        # Pega os primeiros 2 candles de 5min (= 10 minutos de ORB)
         orb_candles = df.head(2)
         
         orb_high = float(orb_candles['high'].max())
         orb_low = float(orb_candles['low'].min())
         current_price = float(df.iloc[-1]['close'])
         
-        # DEBUG: Imprime o cálculo do BTC para validarmos
-        if symbol == 'BTC/USDT:USDT':
-            print(f"🔍 DEBUG BTC (5min) | Sessão: {session_key} | Início: {session_start_dt.strftime('%H:%M UTC')} | ORB High: {orb_high} | ORB Low: {orb_low} | Preço Atual: {current_price} | Candles encontrados: {len(ohlcv)}")
+        print(f"✅ [DEBUG] {symbol} | ORB High: {orb_high} | ORB Low: {orb_low} | Preço: {current_price}")
         
         return {'orb_high': orb_high, 'orb_low': orb_low, 'price': current_price}
     except Exception as e:
-        print(f"❌ Erro ao calcular ORB para {symbol}: {e}")
+        print(f"❌ [DEBUG] Erro ao calcular ORB para {symbol}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 async def scan_pair(exchanges, symbol, session_key):
+    print(f" [DEBUG] Escaneando {symbol}")
     ex_id, ticker = await get_best_exchange_for_pair(exchanges, symbol)
     if not ticker:
+        print(f"⚠️ [DEBUG] {symbol} | Exchange não encontrada")
         return None
     exchange = exchanges[ex_id]
     orb_data = await calculate_orb(exchange, symbol, session_key)
     if not orb_data:
+        print(f"⚠️ [DEBUG] {symbol} | ORB data é None")
         return None
     
     price = orb_data['price']
@@ -179,12 +172,15 @@ async def scan_pair(exchanges, symbol, session_key):
     }
 
 async def run_full_scan(exchanges, session_key):
+    print(f"🚀 [DEBUG] Iniciando scan completo para sessão {session_key}")
     tasks = [scan_pair(exchanges, symbol, session_key) for symbol in BREAKOUT_PROP_PAIRS]
     results = await asyncio.gather(*tasks)
     
     above = sorted([r for r in results if r and r['status'] == 'ACIMA'], key=lambda x: x['distance_pct'], reverse=True)
     below = sorted([r for r in results if r and r['status'] == 'ABAIXO'], key=lambda x: x['distance_pct'], reverse=True)
     inside = [r for r in results if r and r['status'] == 'DENTRO']
+    
+    print(f"📊 [DEBUG] Scan completo: {len(above)} acima, {len(below)} abaixo, {len(inside)} dentro")
     
     return above, below, inside
 
@@ -209,7 +205,7 @@ async def broadcast_scan_results():
                 result_data = {'above': [], 'below': below, 'inside': []}
             elif filter_type == 'inside':
                 result_data = {'above': [], 'below': [], 'inside': inside}
-            else:  # 'all'
+            else:
                 result_data = {'above': above, 'below': below, 'inside': inside}
             
             result_data['updated'] = datetime.now().strftime("%H:%M:%S")
@@ -218,7 +214,7 @@ async def broadcast_scan_results():
             message = json.dumps(result_data, default=str)
             await client.send_text(message)
         except Exception as e:
-            print(f"Erro ao enviar para cliente: {e}")
+            print(f"❌ Erro ao enviar para cliente: {e}")
             disconnected.append(client)
     
     for client in disconnected:
@@ -245,9 +241,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# ═══════════════════════════════════════════════════════════════
-# ROTAS
-# ═══════════════════════════════════════════════════════════════
 @app.get("/candles/{symbol}")
 async def get_candles(symbol: str, timeframe: str = "5m", limit: int = 200):
     cache_key = f"{symbol}_{timeframe}_{limit}"
@@ -306,9 +299,6 @@ async def serve_frontend():
     with open("index.html", "r", encoding="utf-8") as f:
         return f.read()
 
-# ═══════════════════════════════════════════════════════════════
-# INICIALIZAÇÃO
-# ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
