@@ -43,18 +43,13 @@ BREAKOUT_PROP_PAIRS = [
     'MANA/USDT:USDT', 'AXS/USDT:USDT', 'GALA/USDT:USDT',
 ]
 
-scan_cache = {
-    'above': [],
-    'below': [],
-    'inside': [],
-    'updated': None,
-    'session': DEFAULT_SESSION,
-}
-
 candles_cache = {}
 connected_clients = []
 client_filters = {}
 
+# ══════════════════════════════════════════════════════════════
+# FUNÇÕES AUXILIARES
+# ══════════════════════════════════════════════════════════════
 async def create_exchanges():
     return {
         'okx': ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
@@ -122,7 +117,6 @@ async def calculate_orb(exchange, symbol, session_key):
         
         return {'orb_high': orb_high, 'orb_low': orb_low, 'price': current_price}
     except Exception as e:
-        print(f" Erro calculate_orb {symbol}: {e}", file=sys.stderr)
         return None
 
 async def scan_pair(exchanges, symbol, session_key):
@@ -163,12 +157,11 @@ async def scan_pair(exchanges, symbol, session_key):
             'volume_24h': float(ticker.get('quoteVolume', 0) or 0),
         }
     except Exception as e:
-        print(f" Erro scan_pair {symbol}: {e}", file=sys.stderr)
         return None
 
 async def run_full_scan(exchanges, session_key):
     try:
-        print(f" [SCAN INICIADO] Sessão: {session_key} | {len(BREAKOUT_PROP_PAIRS)} pares", file=sys.stderr)
+        print(f" [SCAN] Sessão: {session_key} | {len(BREAKOUT_PROP_PAIRS)} pares", file=sys.stderr)
         tasks = [scan_pair(exchanges, symbol, session_key) for symbol in BREAKOUT_PROP_PAIRS]
         results = await asyncio.gather(*tasks)
         
@@ -176,85 +169,53 @@ async def run_full_scan(exchanges, session_key):
         below = sorted([r for r in results if r and r['status'] == 'ABAIXO'], key=lambda x: x['distance_pct'], reverse=True)
         inside = [r for r in results if r and r['status'] == 'DENTRO']
         
-        print(f" [SCAN COMPLETO] Acima: {len(above)} | Abaixo: {len(below)} | Dentro: {len(inside)}", file=sys.stderr)
+        print(f"✅ [SCAN] Acima: {len(above)} | Abaixo: {len(below)} | Dentro: {len(inside)}", file=sys.stderr)
         
         if above:
             top_3 = [f"{p['symbol']} (+{p['distance_pct']:.2f}%)" for p in above[:3]]
-            print(f" TOP 3 ACIMA: {', '.join(top_3)}", file=sys.stderr)
+            print(f"📊 TOP 3 ACIMA: {', '.join(top_3)}", file=sys.stderr)
         
         return above, below, inside
     except Exception as e:
-        print(f" [ERRO SCAN] {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc(file=sys.stderr)
+        print(f"❌ [ERRO SCAN] {e}", file=sys.stderr)
         return [], [], []
 
-async def broadcast_scan_results():
-    try:
-        if not connected_clients:
-            print(f" [BROADCAST] Sem clientes conectados", file=sys.stderr)
-            return
-        
-        print(f" [BROADCAST] {len(connected_clients)} cliente(s)", file=sys.stderr)
-        
-        disconnected = []
-        for client in connected_clients:
-            try:
-                filters = client_filters.get(client, {'session': DEFAULT_SESSION, 'filter': 'all'})
-                session_key = filters['session']
-                filter_type = filters['filter']
-                
-                exchanges = await create_exchanges()
-                above, below, inside = await run_full_scan(exchanges, session_key)
-                await close_exchanges(exchanges)
-                
-                if filter_type == 'above':
-                    result_data = {'above': above, 'below': [], 'inside': []}
-                elif filter_type == 'below':
-                    result_data = {'above': [], 'below': below, 'inside': []}
-                elif filter_type == 'inside':
-                    result_data = {'above': [], 'below': [], 'inside': inside}
-                else:
-                    result_data = {'above': above, 'below': below, 'inside': inside}
-                
-                result_data['updated'] = datetime.now().strftime("%H:%M:%S")
-                result_data['session'] = session_key
-                
-                message = json.dumps(result_data, default=str)
-                await client.send_text(message)
-                print(f" [ENVIADO] Dados enviados para cliente", file=sys.stderr)
-            except Exception as e:
-                print(f" [ERRO CLIENTE] {e}", file=sys.stderr)
-                disconnected.append(client)
-        
-        for client in disconnected:
-            if client in connected_clients:
-                connected_clients.remove(client)
-            if client in client_filters:
-                del client_filters[client]
-    except Exception as e:
-        print(f" [ERRO BROADCAST] {e}", file=sys.stderr)
-
-async def scanner_loop():
-    print(f" [SCANNER LOOP] Iniciado", file=sys.stderr)
-    count = 0
-    while True:
-        try:
-            count += 1
-            print(f"\n [LOOP] Iteração #{count}", file=sys.stderr)
-            await broadcast_scan_results()
-        except Exception as e:
-            print(f" [ERRO LOOP] {e}", file=sys.stderr)
-        await asyncio.sleep(SCAN_INTERVAL)
-
+# ══════════════════════════════════════════════════════════════
+# APP FASTAPI
+# ══════════════════════════════════════════════════════════════
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(" Servidor iniciando...", file=sys.stderr)
-    print(" Prioridade: OKX > Bybit > Binance", file=sys.stderr)
-    asyncio.create_task(scanner_loop())
+    print("🚀 Servidor iniciando...", file=sys.stderr)
+    print("️ Prioridade: OKX > Bybit > Binance", file=sys.stderr)
     yield
 
 app = FastAPI(lifespan=lifespan)
+
+# ══════════════════════════════════════════════════════════════
+# ROTAS HTTP (Polling - funciona no Render grátis)
+# ══════════════════════════════════════════════════════════════
+@app.get("/api/scan")
+async def api_scan():
+    """Retorna os dados do scan via HTTP (polling a cada 15s)"""
+    try:
+        print(f" [API SCAN] Requisição recebida", file=sys.stderr)
+        exchanges = await create_exchanges()
+        above, below, inside = await run_full_scan(exchanges, DEFAULT_SESSION)
+        await close_exchanges(exchanges)
+        
+        result = {
+            'above': above,
+            'below': below,
+            'inside': inside,
+            'updated': datetime.now().strftime("%H:%M:%S"),
+            'session': DEFAULT_SESSION
+        }
+        
+        print(f"✅ [API SCAN] Enviando {len(above) + len(below) + len(inside)} pares", file=sys.stderr)
+        return result
+    except Exception as e:
+        print(f"❌ [API SCAN ERRO] {e}", file=sys.stderr)
+        return {"error": str(e), "above": [], "below": [], "inside": []}
 
 @app.get("/candles/{symbol}")
 async def get_candles(symbol: str, timeframe: str = "5m", limit: int = 200):
@@ -275,33 +236,40 @@ async def get_candles(symbol: str, timeframe: str = "5m", limit: int = 200):
         if not ohlcv:
             return {"error": "Sem dados"}
         candles = [{'time': int(c[0] / 1000), 'open': float(c[1]), 'high': float(c[2]), 'low': float(c[3]), 'close': float(c[4]), 'volume': float(c[5])} for c in ohlcv]
-        return {'symbol': symbol, 'timeframe': timeframe, 'candles': candles}
+        result = {'symbol': symbol, 'timeframe': timeframe, 'candles': candles}
+        candles_cache[cache_key] = (datetime.now(), result)
+        return result
     except Exception as e:
         return {"error": str(e)}
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    connected_clients.append(websocket)
-    client_filters[websocket] = {'session': DEFAULT_SESSION, 'filter': 'all'}
-    print(f" [WEBSOCKET] Cliente conectado. Total: {len(connected_clients)}", file=sys.stderr)
-    try:
-        while True:
-            message = await websocket.receive_text()
-            data = json.loads(message)
-            if 'session' in data: client_filters[websocket]['session'] = data['session']
-            if 'filter' in data: client_filters[websocket]['filter'] = data['filter']
-            print(f" [FILTRO] Session: {data.get('session')}, Filter: {data.get('filter')}", file=sys.stderr)
-    except WebSocketDisconnect:
-        connected_clients.remove(websocket)
-        if websocket in client_filters: del client_filters[websocket]
-        print(f" [WEBSOCKET] Cliente desconectado", file=sys.stderr)
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
     with open("index.html", "r", encoding="utf-8") as f:
         return f.read()
 
+# ══════════════════════════════════════════════════════════════
+# WEBSOCKET (mantido como fallback, mas o frontend usa HTTP)
+# ══════════════════════════════════════════════════════════════
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    connected_clients.append(websocket)
+    client_filters[websocket] = {'session': DEFAULT_SESSION, 'filter': 'all'}
+    print(f"✅ [WS] Cliente conectado. Total: {len(connected_clients)}", file=sys.stderr)
+    try:
+        while True:
+            message = await websocket.receive_text()
+            data = json.loads(message)
+            if 'session' in data: client_filters[websocket]['session'] = data['session']
+            if 'filter' in data: client_filters[websocket]['filter'] = data['filter']
+    except WebSocketDisconnect:
+        connected_clients.remove(websocket)
+        if websocket in client_filters: del client_filters[websocket]
+        print(f"❌ [WS] Cliente desconectado", file=sys.stderr)
+
+# ═════════════════════════════════════════════════════════════
+# INICIALIZAÇÃO
+# ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
