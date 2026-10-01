@@ -56,9 +56,9 @@ client_filters = {}
 
 async def create_exchanges():
     return {
-        # PRIORIDADE ALTERADA: Bybit e OKX primeiro (não bloqueiam nuvem)
-        'bybit': ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
+        # ORDEM DE PRIORIDADE: OKX (mais permissiva) > Bybit > Binance
         'okx': ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
+        'bybit': ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
         'binance': ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}}),
     }
 
@@ -68,8 +68,7 @@ async def close_exchanges(exchanges):
 
 async def get_best_exchange_for_pair(exchanges, symbol):
     candidates = []
-    # Força a ordem de tentativa: Bybit -> OKX -> Binance
-    exchange_order = ['bybit', 'okx', 'binance']
+    exchange_order = ['okx', 'bybit', 'binance']
     
     for ex_id in exchange_order:
         ex = exchanges[ex_id]
@@ -81,21 +80,15 @@ async def get_best_exchange_for_pair(exchanges, symbol):
                     'ticker': ticker,
                     'volume': float(ticker['quoteVolume'] or 0)
                 })
-        except Exception as e:
-            error_msg = str(e)
-            # Se for o bloqueio 451 da Binance, ignora silenciosamente e pula para a próxima
-            if "451" in error_msg or "restricted location" in error_msg:
-                continue
-            # Qualquer outro erro, também pula para a próxima exchange
+        except Exception:
+            # Se der QUALQUER erro (451, 403, par não existe), ignora e tenta a próxima
             continue
             
     if not candidates:
         return None, None
         
-    # Ordena pelo maior volume
     candidates.sort(key=lambda x: x['volume'], reverse=True)
-    best = candidates[0]
-    return best['exchange'], best['ticker']
+    return candidates[0]['exchange'], candidates[0]['ticker']
 
 def get_session_start_utc(session_key):
     session_time = ORB_SESSIONS[session_key]
@@ -116,43 +109,42 @@ def get_session_start_utc(session_key):
 async def calculate_orb(exchange, symbol, session_key):
     try:
         session_start_ms, session_start_dt = get_session_start_utc(session_key)
-        
-        # Busca candles de 5min a partir do início da sessão
         ohlcv = await exchange.fetch_ohlcv(symbol, '5m', since=session_start_ms, limit=4)
         
         if not ohlcv or len(ohlcv) < 2:
             return None
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        orb_candles = df.head(2) # 2 candles de 5min = 10 minutos
+        orb_candles = df.head(2)
         
         orb_high = float(orb_candles['high'].max())
         orb_low = float(orb_candles['low'].min())
         current_price = float(df.iloc[-1]['close'])
         
-        # DEBUG: Mostra qual exchange foi usada e os valores
         if symbol == 'BTC/USDT:USDT':
-            print(f"✅ [DEBUG BTC] Exchange usada: {exchange.name} | ORB High: {orb_high} | ORB Low: {orb_low} | Preço: {current_price}")
+            print(f"✅ [DEBUG BTC] Exchange: {exchange.name.upper()} | High: {orb_high} | Low: {orb_low} | Preço: {current_price}")
         
         return {'orb_high': orb_high, 'orb_low': orb_low, 'price': current_price}
-    except Exception as e:
+    except Exception:
         return None
 
 async def scan_pair(exchanges, symbol, session_key):
     ex_id, ticker = await get_best_exchange_for_pair(exchanges, symbol)
+    
     if not ticker:
+        if symbol == 'BTC/USDT:USDT':
+            print(f"❌ [DEBUG BTC] NENHUMA exchange funcionou para este par.")
         return None
+        
     exchange = exchanges[ex_id]
     orb_data = await calculate_orb(exchange, symbol, session_key)
+    
     if not orb_data:
         return None
     
     price = orb_data['price']
     orb_high = orb_data['orb_high']
     orb_low = orb_data['orb_low']
-    
-    status = None
-    distance_pct = 0
     
     if price > orb_high:
         status = 'ACIMA'
@@ -214,7 +206,7 @@ async def broadcast_scan_results():
             
             message = json.dumps(result_data, default=str)
             await client.send_text(message)
-        except Exception as e:
+        except Exception:
             disconnected.append(client)
     
     for client in disconnected:
@@ -228,13 +220,13 @@ async def scanner_loop():
         try:
             await broadcast_scan_results()
         except Exception as e:
-            print(f"Erro no scan: {e}")
+            print(f"Erro no loop: {e}")
         await asyncio.sleep(SCAN_INTERVAL)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 Servidor iniciando...")
-    print("🛡️ Prioridade de Exchange: Bybit > OKX > Binance (para evitar bloqueio de IP)")
+    print("🛡️ Prioridade: OKX > Bybit > Binance (Anti-bloqueio)")
     asyncio.create_task(scanner_loop())
     yield
 
@@ -259,9 +251,7 @@ async def get_candles(symbol: str, timeframe: str = "5m", limit: int = 200):
         if not ohlcv:
             return {"error": "Sem dados"}
         candles = [{'time': int(c[0] / 1000), 'open': float(c[1]), 'high': float(c[2]), 'low': float(c[3]), 'close': float(c[4]), 'volume': float(c[5])} for c in ohlcv]
-        result = {'symbol': symbol, 'timeframe': timeframe, 'candles': candles}
-        candles_cache[cache_key] = (datetime.now(), result)
-        return result
+        return {'symbol': symbol, 'timeframe': timeframe, 'candles': candles}
     except Exception as e:
         return {"error": str(e)}
 
