@@ -75,10 +75,13 @@ async def get_best_exchange_for_pair(exchanges, symbol):
                     'ticker': ticker,
                     'volume': float(ticker['quoteVolume'] or 0)
                 })
-        except Exception:
+                print(f"✅ {symbol} | {ex_id.upper()} funcionou | Volume: {ticker['quoteVolume']}", file=sys.stderr)
+        except Exception as e:
+            print(f" {symbol} | {ex_id.upper()} falhou: {str(e)[:80]}", file=sys.stderr)
             continue
             
     if not candidates:
+        print(f"⚠️ {symbol} | NENHUMA exchange funcionou", file=sys.stderr)
         return None, None
         
     candidates.sort(key=lambda x: x['volume'], reverse=True)
@@ -103,9 +106,14 @@ def get_session_start_utc(session_key):
 async def calculate_orb(exchange, symbol, session_key):
     try:
         session_start_ms, session_start_dt = get_session_start_utc(session_key)
+        print(f"🔍 {symbol} | Buscando candles desde {session_start_dt.strftime('%H:%M UTC')}", file=sys.stderr)
+        
         ohlcv = await exchange.fetch_ohlcv(symbol, '5m', since=session_start_ms, limit=4)
         
+        print(f"📊 {symbol} | Candles retornados: {len(ohlcv) if ohlcv else 0}", file=sys.stderr)
+        
         if not ohlcv or len(ohlcv) < 2:
+            print(f"⚠️ {symbol} | Menos de 2 candles", file=sys.stderr)
             return None
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -115,8 +123,11 @@ async def calculate_orb(exchange, symbol, session_key):
         orb_low = float(orb_candles['low'].min())
         current_price = float(df.iloc[-1]['close'])
         
+        print(f"✅ {symbol} | ORB High: {orb_high} | Low: {orb_low} | Preço: {current_price}", file=sys.stderr)
+        
         return {'orb_high': orb_high, 'orb_low': orb_low, 'price': current_price}
     except Exception as e:
+        print(f"❌ {symbol} | Erro calculate_orb: {e}", file=sys.stderr)
         return None
 
 async def scan_pair(exchanges, symbol, session_key):
@@ -157,11 +168,12 @@ async def scan_pair(exchanges, symbol, session_key):
             'volume_24h': float(ticker.get('quoteVolume', 0) or 0),
         }
     except Exception as e:
+        print(f"❌ {symbol} | Erro scan_pair: {e}", file=sys.stderr)
         return None
 
 async def run_full_scan(exchanges, session_key):
     try:
-        print(f" [SCAN] Sessão: {session_key} | {len(BREAKOUT_PROP_PAIRS)} pares", file=sys.stderr)
+        print(f"🚀 [SCAN] Sessão: {session_key} | {len(BREAKOUT_PROP_PAIRS)} pares", file=sys.stderr)
         tasks = [scan_pair(exchanges, symbol, session_key) for symbol in BREAKOUT_PROP_PAIRS]
         results = await asyncio.gather(*tasks)
         
@@ -191,14 +203,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# ══════════════════════════════════════════════════════════════
-# ROTAS HTTP (Polling - funciona no Render grátis)
+# ═════════════════════════════════════════════════════════════
+# ROTAS HTTP (Polling)
 # ══════════════════════════════════════════════════════════════
 @app.get("/api/scan")
 async def api_scan():
     """Retorna os dados do scan via HTTP (polling a cada 15s)"""
     try:
-        print(f" [API SCAN] Requisição recebida", file=sys.stderr)
+        print(f"📡 [API SCAN] Requisição recebida", file=sys.stderr)
         exchanges = await create_exchanges()
         above, below, inside = await run_full_scan(exchanges, DEFAULT_SESSION)
         await close_exchanges(exchanges)
@@ -248,7 +260,7 @@ async def serve_frontend():
         return f.read()
 
 # ══════════════════════════════════════════════════════════════
-# WEBSOCKET (mantido como fallback, mas o frontend usa HTTP)
+# WEBSOCKET (fallback)
 # ══════════════════════════════════════════════════════════════
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
